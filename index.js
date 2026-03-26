@@ -1,17 +1,26 @@
 const GEMINI_URL = "https://gemini.google.com/";
-const GEMINI_API = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate";
-const UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
+const GEMINI_API =
+  "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate";
+
+const UA =
+  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36";
 
 let session = null;
 let reqId = 1;
 
+// 🔹 Initialize session
 async function initSession() {
-  const res = await fetch(GEMINI_URL, { headers: { "user-agent": UA } });
+  const res = await fetch(GEMINI_URL, {
+    headers: { "user-agent": UA },
+  });
+
   const html = await res.text();
+
   const extract = (pattern) => {
     const match = html.match(pattern);
     return match ? match[1] : "";
   };
+
   session = {
     snlm0e: extract(/"SNlM0e":"(.*?)"/),
     cfb2h: extract(/"cfb2h":"(.*?)"/),
@@ -19,120 +28,129 @@ async function initSession() {
   };
 }
 
+// 🔹 Ask Gemini
 async function ask(prompt) {
   if (!session) await initSession();
 
-  const payload = [null, JSON.stringify([[prompt, 0, null, null, null, null, 0]])];
+  const payload = [
+    null,
+    JSON.stringify([[prompt, 0, null, null, null, null, 0]]),
+  ];
 
   const params = new URLSearchParams({
     bl: session.cfb2h,
     "f.sid": session.fdrfje,
-    hl: "id",
+    hl: "en",
     _reqid: String(reqId),
     rt: "c",
   });
 
-  reqId += 1;
+  reqId++;
 
-  const body = `f.req=${encodeURIComponent(JSON.stringify(payload))}&at=${session.snlm0e}`;
+  const body = `f.req=${encodeURIComponent(
+    JSON.stringify(payload)
+  )}&at=${session.snlm0e}`;
 
   const res = await fetch(`${GEMINI_API}?${params.toString()}`, {
     method: "POST",
     headers: {
-      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "content-type":
+        "application/x-www-form-urlencoded;charset=UTF-8",
       "user-agent": UA,
       "x-same-domain": "1",
     },
     body,
   });
 
-  return parse(await res.text());
+  const text = await res.text();
+  return parse(text);
 }
 
+// 🔹 Parse Gemini response
 function parse(text) {
   let result = null;
-  const lines = text.split("\n").filter((line) => line.startsWith('[["wrb.fr"'));
+
+  const lines = text
+    .split("\n")
+    .filter((line) => line.startsWith('[["wrb.fr"'));
+
   for (const line of lines) {
     try {
       const outer = JSON.parse(line);
       const inner = JSON.parse(outer[0][2]);
-      const candidate = inner[4][0][1];
+      const candidate = inner?.[4]?.[0]?.[1];
+
       if (candidate) {
-        result = Array.isArray(candidate) ? candidate[0] : candidate;
+        result = Array.isArray(candidate)
+          ? candidate[0]
+          : candidate;
       }
-    } catch (_) {}
+    } catch (e) {}
   }
+
   return result;
 }
 
-function extractPrompt(url) {
-  const parsed = new URL(url, "https://localhost");
-  const raw = parsed.pathname.replace(/^\/+/, "");
-  const query = parsed.search ? parsed.search : "";
-  const combined = decodeURIComponent(raw + query);
-  return combined.trim() || null;
+// 🔹 Extract prompt from URL
+function extractPrompt(req) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const raw = url.pathname.replace(/^\/api\/ask\/?/, "");
+  return decodeURIComponent(raw).trim();
 }
 
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "GET, POST, OPTIONS",
-      "access-control-allow-headers": "Content-Type",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-    },
-  });
-}
+// 🔹 Vercel handler
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET, POST, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
 
-export default {
-  async fetch(request) {
-    if (request.method === "OPTIONS") {
-      return jsonResponse({ status: "ok" }, 204);
-    }
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
 
-    const prompt = extractPrompt(request.url);
+  const prompt =
+    req.method === "POST"
+      ? req.body?.prompt
+      : extractPrompt(req);
 
-    if (!prompt) {
-      return jsonResponse(
-        {
-          success: false,
-          error: "MISSING_PROMPT",
-          message: "No prompt provided. Usage: https://your-api.com/your prompt here",
-        },
-        400
-      );
-    }
+  if (!prompt) {
+    return res.status(400).json({
+      success: false,
+      error: "MISSING_PROMPT",
+      message:
+        "Usage: /api/ask/your prompt OR POST { prompt }",
+    });
+  }
 
-    try {
-      const response = await ask(prompt);
-      if (!response) {
-        return jsonResponse(
-          {
-            success: false,
-            error: "EMPTY_RESPONSE",
-            message: "Gemini returned no response for the given prompt.",
-          },
-          502
-        );
-      }
-      return jsonResponse({
-        success: true,
-        prompt,
-        response,
+  try {
+    const response = await ask(prompt);
+
+    if (!response) {
+      return res.status(502).json({
+        success: false,
+        error: "EMPTY_RESPONSE",
       });
-    } catch (err) {
-      session = null;
-      return jsonResponse(
-        {
-          success: false,
-          error: "INTERNAL_ERROR",
-          message: err.message || "An unexpected error occurred.",
-        },
-        500
-      );
     }
-  },
-};
+
+    return res.status(200).json({
+      success: true,
+      prompt,
+      response,
+    });
+  } catch (err) {
+    session = null;
+
+    return res.status(500).json({
+      success: false,
+      error: "INTERNAL_ERROR",
+      message: err.message,
+    });
+  }
+}
